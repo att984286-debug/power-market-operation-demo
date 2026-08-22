@@ -2,6 +2,9 @@
 
 ## 客户负荷、合同覆盖与偏差风险监测
 
+**在线 Demo：** 你的Streamlit地址<br>
+**GitHub：** https://github.com/att984286-debug/power-market-operation-demo
+
 这是一个面向电力行业交流和求职展示的 Streamlit 分析原型。它用三类工商业客户的模拟数据，把售电运营中常见的分析链路串起来：
 
 ```text
@@ -35,6 +38,13 @@
 
 覆盖率和仓位展示采用**客户级批发采购分摊分析口径**，不代表售电公司组合整体仓位，也不构成安徽正式市场结算。
 
+> 风险等级为 Demo 分析标签，不是安徽市场正式交易规则。
+
+## 项目截图
+
+- 首页风险总览截图：`screenshots/dashboard.png`（待补充）
+- MFG01案例截图：`screenshots/mfg01-case.png`（待补充）
+
 ## 数据范围
 
 - 3类模拟客户：制造业 MFG01、连续工业 CONT01、商业建筑 COMM01；
@@ -47,7 +57,7 @@
 
 ## 本地运行
 
-需要 Python 3.12（或兼容的 Python 3.x 环境）。在仓库根目录执行：
+已验证 Python 3.12 与 Python 3.14。建议本地运行和 Streamlit Cloud 使用同一 Python 版本。在仓库根目录执行：
 
 ```bash
 python -m pip install -r requirements.txt
@@ -63,7 +73,7 @@ streamlit run app.py
 1. 将本仓库推送到 GitHub，并确认仓库根目录直接包含 `app.py`、`data/`、`requirements.txt` 和 `README.md`；
 2. 登录 Streamlit Community Cloud，连接 GitHub；
 3. 选择 `Create app`，填写仓库、分支和入口文件 `app.py`；
-4. 在 Advanced settings 中选择 Python 3.12；
+4. 在 Advanced settings 中选择 Python 3.12 或 Python 3.14；当前 `requirements.txt` 已验证这两个版本；
 5. 点击 Deploy，等待依赖安装和应用启动；
 6. 打开生成的 `https://<subdomain>.streamlit.app/` 链接，按上面的首次查看路径复核。
 

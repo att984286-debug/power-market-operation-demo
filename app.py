@@ -293,7 +293,7 @@ def render_dashboard(data: dict[str, pd.DataFrame], selected_date: Any, customer
     k4.metric("高风险客户数量", high_risk_count)
 
     st.subheader("客户风险总览")
-    st.dataframe(overview, use_container_width=True, hide_index=True)
+    st.dataframe(overview, width="stretch", hide_index=True)
 
     st.subheader("所选日期重点事件")
     if events.empty:
@@ -341,12 +341,12 @@ def render_profile(data: dict[str, pd.DataFrame], customer_id: str) -> None:
     fig.add_trace(go.Scatter(x=monthly["month"], y=monthly["energy_mwh"], mode="lines+markers", name="月用电量"))
     fig.update_yaxes(title="月用电量（MWh）")
     fig.update_xaxes(title="月份")
-    st.plotly_chart(figure_layout(fig, 340), use_container_width=True)
+    st.plotly_chart(figure_layout(fig, 340), width="stretch")
 
     state_counts = calendar["day_state"].map(lambda x: STATE_LABELS.get(str(x), str(x))).value_counts().reset_index()
     state_counts.columns = ["状态", "天数"]
     st.subheader("年度运行状态分布")
-    st.dataframe(state_counts, use_container_width=True, hide_index=True)
+    st.dataframe(state_counts, width="stretch", hide_index=True)
 
 
 def render_load_analysis(data: dict[str, pd.DataFrame], customer_id: str, selected_date: Any) -> None:
@@ -387,7 +387,7 @@ def render_load_analysis(data: dict[str, pd.DataFrame], customer_id: str, select
         )
     fig.update_yaxes(title="功率（MW）")
     fig.update_xaxes(title="时刻")
-    st.plotly_chart(figure_layout(fig, 430), use_container_width=True)
+    st.plotly_chart(figure_layout(fig, 430), width="stretch")
 
     # A compact workday/weekend comparison, using the existing simulated calendar.
     # The flattened intraday sheet has one shared timestamp; join this customer's
@@ -407,7 +407,7 @@ def render_load_analysis(data: dict[str, pd.DataFrame], customer_id: str, select
         fig_profile.add_trace(go.Scatter(x=part["时刻"], y=part["actual_power_mw"], mode="lines", name=label, line=dict(color=color)))
     fig_profile.update_yaxes(title="平均功率（MW）")
     fig_profile.update_xaxes(title="时刻")
-    st.plotly_chart(figure_layout(fig_profile, 320), use_container_width=True)
+    st.plotly_chart(figure_layout(fig_profile, 320), width="stretch")
 
     st.subheader("运营含义")
     daily_row = metric_row(data, customer_id, curve_date)
@@ -421,7 +421,7 @@ def render_load_analysis(data: dict[str, pd.DataFrame], customer_id: str, select
     events["day_state"] = events["day_state"].map(lambda x: STATE_LABELS.get(str(x), str(x)))
     events.columns = ["日期", "状态", "事件类型", "触发条件", "事件获知时间"]
     st.subheader("典型异常事件")
-    st.dataframe(events.sort_values("日期").tail(8), use_container_width=True, hide_index=True)
+    st.dataframe(events.sort_values("日期").tail(8), width="stretch", hide_index=True)
 
 
 def render_coverage(data: dict[str, pd.DataFrame], selected_date: Any) -> None:
@@ -463,7 +463,7 @@ def render_coverage(data: dict[str, pd.DataFrame], selected_date: Any) -> None:
         )
     fig.update_yaxes(title="功率（MW）")
     fig.update_xaxes(title="时刻")
-    st.plotly_chart(figure_layout(fig, 420), use_container_width=True)
+    st.plotly_chart(figure_layout(fig, 420), width="stretch")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -487,6 +487,7 @@ def render_coverage(data: dict[str, pd.DataFrame], selected_date: Any) -> None:
 
 def render_event_recap(data: dict[str, pd.DataFrame], selected_date: Any, customer_id: str) -> None:
     st.header("事件复盘：把数据异常转化为运营动作")
+    st.caption("事件获知时间不等于实际风险发现时间；下方时间线用于模拟运营复盘，不代表正式结算时点。")
     row = metric_row(data, customer_id, selected_date)
     calendar_row = get_calendar_row(data, customer_id, selected_date)
     customer_data = customer_intraday(data, customer_id)
@@ -512,7 +513,7 @@ def render_event_recap(data: dict[str, pd.DataFrame], selected_date: Any, custom
         ],
         columns=["时间", "节点", "可用信息与运营含义"],
     )
-    st.dataframe(timeline, use_container_width=True, hide_index=True)
+    st.dataframe(timeline, width="stretch", hide_index=True)
     st.subheader("模拟运营建议")
     for action in (
         "联系客户确认设备和生产状态，核实事件是否影响剩余时段。",
@@ -555,14 +556,14 @@ def render_credibility(data: dict[str, pd.DataFrame]) -> None:
     for column in first.columns:
         first[column] = first[column].fillna("").astype(str)
     if not first.empty:
-        st.dataframe(first, use_container_width=True, hide_index=True)
+        st.dataframe(first, width="stretch", hide_index=True)
     st.caption("质量检查来源：年度模拟工作簿中的‘质量检查’工作表；本Demo只读展示，不回写源文件。")
 
 
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, page_icon="⚡", layout="wide")
     st.title(APP_TITLE)
-    st.caption("客户负荷、合同覆盖与偏差风险监测｜本地离线Demo｜模拟数据，不构成交易或结算依据")
+    st.caption("客户负荷、合同覆盖与偏差风险监测｜公开展示Demo｜模拟数据，不构成交易或结算依据")
 
     try:
         data = load_data(str(DATA_PATH))
