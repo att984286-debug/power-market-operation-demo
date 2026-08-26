@@ -7,6 +7,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from decision_rules import decision_items, event_snapshot
+from forecasting import backtest_customer, forecast_day, scenario_category, summarize_backtest
+
 
 APP_TITLE = "售电运营数据分析原型"
 DATA_FILENAME = "售电交易辅助分析系统——2026全年模拟数据 v1.0.xlsx"
@@ -257,9 +260,51 @@ def figure_layout(fig: go.Figure, height: int = 360) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
+def cached_customer_backtest(customer_data: pd.DataFrame, calendar: pd.DataFrame) -> pd.DataFrame:
+    """Cache the reproducible chronological baseline backtest."""
+
+    return backtest_customer(customer_data, calendar)
+
+
+def scenario_date(data: dict[str, pd.DataFrame], customer_id: str, scenario: str) -> Any | None:
+    """Pick a representative date without changing the source workbook."""
+
+    calendar = data["state_calendar"].loc[data["state_calendar"]["customer_id"] == customer_id].copy()
+    if scenario == "自选日期":
+        return None
+    event = calendar["event_type"].notna() & (calendar["event_type"].astype(str).str.strip() != "")
+    if scenario == "正常运营日":
+        candidates = calendar.loc[~event].sort_values("date")
+    elif scenario == "计划变化日":
+        candidates = calendar.loc[event & calendar["event_known_at_forecast_flag"].eq(1)].sort_values("date")
+    else:
+        candidates = calendar.loc[event & calendar["event_known_at_forecast_flag"].eq(0)].sort_values("date")
+    return None if candidates.empty else candidates.iloc[0]["date"]
+
+
+def scenario_caption(data: dict[str, pd.DataFrame], customer_id: str, selected_date: Any) -> str:
+    row = get_calendar_row(data, customer_id, selected_date)
+    if row is None:
+        return "场景：正常日｜未找到事件台账"
+    label = scenario_category(row)
+    event_type = row.get("event_type")
+    event_text = "" if pd.isna(event_type) else f"｜事件：{event_type}"
+    return f"场景：{label}{event_text}"
+
+
+def backtest_summary_for_customer(data: dict[str, pd.DataFrame], customer_id: str) -> pd.DataFrame:
+    customer_data = customer_intraday(data, customer_id)
+    calendar = data["state_calendar"].loc[data["state_calendar"]["customer_id"] == customer_id].copy()
+    backtest = cached_customer_backtest(customer_data, calendar)
+    return summarize_backtest(backtest)
+
+
 def render_dashboard(data: dict[str, pd.DataFrame], selected_date: Any, customer_filter: str) -> None:
-    st.header("所选分析日的客户风险总览")
-    st.caption("页面中的‘风险等级’为Demo筛选标签，仅用于运营关注排序，不是安徽市场正式考核或结算规则。")
+    st.header("今天哪些客户值得关注，为什么")
+    st.caption(
+        "先区分正常日、计划变化日和突发事件日，再看预测误差与覆盖变化；风险等级仅为Demo分析标签。"
+    )
 
     customer_ids = CUSTOMERS if customer_filter == "全部客户" else [customer_filter]
     rows: list[dict[str, Any]] = []
@@ -272,7 +317,9 @@ def render_dashboard(data: dict[str, pd.DataFrame], selected_date: Any, customer
                 "客户": CUSTOMER_LABELS[customer_id],
                 "行业": data["params"].loc[data["params"]["customer_id"] == customer_id, "类型"].iloc[0],
                 "当前状态": STATE_LABELS.get(str(row["day_state"]), str(row["day_state"])),
+                "场景": scenario_category(calendar_row),
                 "负荷风险等级": risk,
+                "源表日前预测误差": fmt_pct(row["forecast_mape_ratio"]),
                 "预测覆盖率": fmt_pct(row["contract_coverage_ratio"]),
                 "实际覆盖率": fmt_pct(row["actual_coverage_ratio"]),
                 "是否需要关注": "是" if risk != "常态" else "否",
@@ -294,6 +341,8 @@ def render_dashboard(data: dict[str, pd.DataFrame], selected_date: Any, customer
 
     st.subheader("客户风险总览")
     st.dataframe(overview, width="stretch", hide_index=True)
+    if customer_filter != "全部客户":
+        st.info(scenario_caption(data, customer_filter, selected_date))
 
     st.subheader("所选日期重点事件")
     if events.empty:
@@ -304,7 +353,7 @@ def render_dashboard(data: dict[str, pd.DataFrame], selected_date: Any, customer
             with st.container(border=True):
                 c1, c2, c3, c4 = st.columns(4)
                 c1.markdown(f"**客户**\n\n{CUSTOMER_LABELS.get(str(event['customer_id']), event['customer_id'])}")
-                c2.markdown(f"**事件时间**\n\n{event['event_known_time']:%Y-%m-%d %H:%M}")
+                c2.markdown(f"**事件获知时间**\n\n{event['event_known_time']:%Y-%m-%d %H:%M}")
                 c3.markdown(f"**实际/预测电量**\n\n{fmt_mwh(row['daily_energy_mwh'])} / {fmt_mwh(row['forecast_energy_mwh'])}")
                 c4.markdown(f"**风险**\n\n{risk_level(row, event)}")
                 st.caption(
@@ -337,6 +386,19 @@ def render_profile(data: dict[str, pd.DataFrame], customer_id: str) -> None:
     }[customer_id]
     st.info(f"主要交易运营风险：{risk_text}")
 
+    backtest_summary = backtest_summary_for_customer(data, customer_id)
+    if not backtest_summary.empty:
+        display = backtest_summary[
+            ["scenario", "days", "wape_ratio", "mae_mw", "p90_daily_wape_ratio"]
+        ].copy()
+        display.columns = ["场景", "回测天数", "WAPE", "平均绝对误差（MW）", "日误差P90"]
+        display["WAPE"] = display["WAPE"].map(fmt_pct)
+        display["平均绝对误差（MW）"] = display["平均绝对误差（MW）"].map(fmt_mw)
+        display["日误差P90"] = display["日误差P90"].map(fmt_pct)
+        st.subheader("可预测性：正常日与变化日分开看")
+        st.caption("同类日前4天同一时刻中位数＋已知状态修正；仅使用目标日前数据，结果为模拟回测。")
+        st.dataframe(display, width="stretch", hide_index=True)
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=monthly["month"], y=monthly["energy_mwh"], mode="lines+markers", name="月用电量"))
     fig.update_yaxes(title="月用电量（MWh）")
@@ -358,10 +420,13 @@ def render_load_analysis(data: dict[str, pd.DataFrame], customer_id: str, select
         value=selected_date,
         min_value=min(available_dates),
         max_value=max(available_dates),
-        key="load_curve_date",
+        key=f"load_curve_date_{selected_date}",
     )
     day = customer_data.loc[customer_data["date"] == curve_date].copy()
     calendar_row = get_calendar_row(data, customer_id, curve_date)
+    customer_calendar = data["state_calendar"].loc[
+        data["state_calendar"]["customer_id"] == customer_id
+    ].copy()
     if day.empty:
         st.warning("所选日期没有可展示的15分钟记录。")
         return
@@ -370,10 +435,19 @@ def render_load_analysis(data: dict[str, pd.DataFrame], customer_id: str, select
     event_text = "无模拟事件" if calendar_row is None or pd.isna(calendar_row.get("event_type")) else str(calendar_row["event_type"])
     st.caption(f"客户：{CUSTOMER_LABELS[customer_id]}｜状态：{state_text}｜事件：{event_text}")
 
+    model_day = forecast_day(customer_data, customer_calendar, curve_date)
+    if not model_day.empty:
+        model_columns = [
+            "datetime_15m_start",
+            "baseline_forecast_power_mw",
+            "state_adjusted_forecast_power_mw",
+        ]
+        day = day.merge(model_day[model_columns], on="datetime_15m_start", how="left")
+
     fig = go.Figure()
     for column, label, color in (
         ("actual_power_mw", "实际负荷", "#0B6E99"),
-        ("forecast_power_mw", "预测负荷", "#D97706"),
+        ("forecast_power_mw", "模拟日前预测（源表）", "#D97706"),
         ("submitted_power_mw", "日前申报", "#7C3AED"),
     ):
         fig.add_trace(
@@ -385,9 +459,48 @@ def render_load_analysis(data: dict[str, pd.DataFrame], customer_id: str, select
                 line=dict(color=color, width=2),
             )
         )
+    if "baseline_forecast_power_mw" in day:
+        fig.add_trace(
+            go.Scatter(
+                x=day["datetime_15m_start"].dt.strftime("%H:%M"),
+                y=day["baseline_forecast_power_mw"],
+                mode="lines",
+                name="回测基准预测",
+                line=dict(color="#16A34A", width=2, dash="dot"),
+            )
+        )
+    if "state_adjusted_forecast_power_mw" in day:
+        fig.add_trace(
+            go.Scatter(
+                x=day["datetime_15m_start"].dt.strftime("%H:%M"),
+                y=day["state_adjusted_forecast_power_mw"],
+                mode="lines",
+                name="已知状态修正预测",
+                line=dict(color="#0891B2", width=2, dash="dash"),
+            )
+        )
     fig.update_yaxes(title="功率（MW）")
     fig.update_xaxes(title="时刻")
     st.plotly_chart(figure_layout(fig, 430), width="stretch")
+
+    backtest = cached_customer_backtest(customer_data, customer_calendar)
+    selected_backtest = backtest.loc[backtest["date"] == curve_date] if not backtest.empty else pd.DataFrame()
+    st.subheader("预测方法与当天回测")
+    st.caption(
+        "回测基准使用目标日前4个同类日的同一15分钟负荷中位数；已知状态修正只使用预测签发前已知的状态假设。"
+    )
+    if selected_backtest.empty:
+        st.info("该日期尚未形成足够的历史同类日样本，暂不展示回测指标。")
+    else:
+        result = selected_backtest.iloc[0]
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("场景", str(result["scenario"]))
+        m2.metric("回测参考日", f"{int(result['reference_days'])}天")
+        m3.metric("基准WAPE", fmt_pct(result["基准预测_wape_ratio"]))
+        m4.metric("状态修正WAPE", fmt_pct(result["已知状态修正_wape_ratio"]))
+        st.caption(
+            "WAPE是模拟回测指标，不是生产模型准确率；未知突发事件只能在事中被识别，不能回填到日前预测。"
+        )
 
     # A compact workday/weekend comparison, using the existing simulated calendar.
     # The flattened intraday sheet has one shared timestamp; join this customer's
@@ -411,7 +524,7 @@ def render_load_analysis(data: dict[str, pd.DataFrame], customer_id: str, select
 
     st.subheader("运营含义")
     daily_row = metric_row(data, customer_id, curve_date)
-    st.info(risk_explanation(daily_row, calendar_row))
+    st.info(f"{scenario_caption(data, customer_id, curve_date)}｜{risk_explanation(daily_row, calendar_row)}")
 
     events = data["state_calendar"].loc[
         (data["state_calendar"]["customer_id"] == customer_id)
@@ -425,7 +538,7 @@ def render_load_analysis(data: dict[str, pd.DataFrame], customer_id: str, select
 
 
 def render_coverage(data: dict[str, pd.DataFrame], selected_date: Any) -> None:
-    st.header("合同覆盖需要同时看预测、申报和实际用电")
+    st.header("预测不确定性如何改变合同覆盖判断")
     st.warning("模拟客户级批发采购分摊分析，不代表真实合同、公司整体仓位或安徽正式结算。")
     customer_id = "MFG01"
     row = metric_row(data, customer_id, selected_date)
@@ -476,6 +589,23 @@ def render_coverage(data: dict[str, pd.DataFrame], selected_date: Any) -> None:
             f"**事后复盘**：同一分摊仓位 ÷ 实际用电量 = **{fmt_pct(row['actual_coverage_ratio'])}**。\n\n"
             "它用于解释实际负荷变化如何改变风险暴露，不等于正式结算公式。"
         )
+    event_value = None if calendar_row is None else calendar_row.get("event_type")
+    has_event = event_value is not None and not pd.isna(event_value) and str(event_value).strip() != ""
+    if calendar_row is not None and has_event:
+        snapshot = event_snapshot(intraday, calendar_row.get("event_known_time"))
+        st.subheader("MFG01事件的量化解释")
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("事件前预测/实际", f"{snapshot['before_forecast_mwh']:.2f} / {snapshot['before_actual_mwh']:.2f} MWh")
+        q2.metric("剩余原预测", f"{snapshot['remaining_forecast_mwh']:.2f} MWh")
+        q3.metric("剩余事后实际", f"{snapshot['remaining_actual_mwh']:.2f} MWh")
+        q4.metric("剩余采购分摊", f"{snapshot['remaining_contract_mwh']:.2f} MWh")
+        st.caption(
+            "事后复盘显示原预测在事件后高估了剩余需求；事中不能使用这项实际结果，而应根据客户恢复时间建立不恢复/部分恢复情景。"
+        )
+        st.info(
+            "当前分析输出的是交易负责人需要复核的输入：受影响时段、剩余电量和客户级分摊量；"
+            "不能从单个客户结果直接推导公司整体交易动作。"
+        )
     if calendar_row is not None:
         st.caption(
             f"状态：{STATE_LABELS.get(str(calendar_row['day_state']), str(calendar_row['day_state']))}｜"
@@ -486,8 +616,8 @@ def render_coverage(data: dict[str, pd.DataFrame], selected_date: Any) -> None:
 
 
 def render_event_recap(data: dict[str, pd.DataFrame], selected_date: Any, customer_id: str) -> None:
-    st.header("事件复盘：把数据异常转化为运营动作")
-    st.caption("事件获知时间不等于实际风险发现时间；下方时间线用于模拟运营复盘，不代表正式结算时点。")
+    st.header("从数据异常到运营判断：为什么现在行动")
+    st.caption("时间线区分预测、申报、事件获知和事后复盘；不把事后结果回填到日前预测。")
     row = metric_row(data, customer_id, selected_date)
     calendar_row = get_calendar_row(data, customer_id, selected_date)
     customer_data = customer_intraday(data, customer_id)
@@ -498,31 +628,39 @@ def render_event_recap(data: dict[str, pd.DataFrame], selected_date: Any, custom
     event_type = None if calendar_row is None else calendar_row.get("event_type")
     cause = None if calendar_row is None else calendar_row.get("触发条件")
 
-    if calendar_row is None or pd.isna(event_type):
+    has_event = event_type is not None and not pd.isna(event_type) and str(event_type).strip() != ""
+    if calendar_row is None or not has_event:
         st.success("所选日期没有模拟异常事件，建议按常态流程跟踪负荷与覆盖。")
         st.info(risk_explanation(row, calendar_row))
         return
 
+    snapshot = event_snapshot(day, event_time)
+    next_check = None if event_time is None else pd.Timestamp(event_time) + pd.to_timedelta(15, unit="min")
     timeline = pd.DataFrame(
         [
             [forecast_time, "预测签发", "只使用当时可获得的天气、客户状态和历史负荷信息。"],
             [submitted_time, "日前申报", "形成日前申报与批发采购分摊判断。"],
             [event_time, "事件获知", f"模拟事件：{event_type}；原因台账：{cause}。"],
-            [event_time, "风险发现", f"实际电量 {fmt_mwh(row['daily_energy_mwh'])}，预测电量 {fmt_mwh(row['forecast_energy_mwh'])}。"],
-            [event_time, "运营动作", "联系客户、更新剩余时段预测、重算仓位并跟踪恢复。"],
+            [event_time, "事中判断", "先确认影响范围和恢复信息，再建立剩余负荷情景。"],
+            [next_check, "下一检查点", "根据客户恢复时间或连续15分钟数据重新判断。"],
         ],
-        columns=["时间", "节点", "可用信息与运营含义"],
+        columns=["时间", "节点", "可用信息与判断含义"],
     )
     st.dataframe(timeline, width="stretch", hide_index=True)
-    st.subheader("模拟运营建议")
-    for action in (
-        "联系客户确认设备和生产状态，核实事件是否影响剩余时段。",
-        "根据已知信息更新剩余时段负荷判断，不回填事后信息到日前预测。",
-        "重新计算客户级批发采购分摊覆盖与偏差风险。",
-        "跟踪恢复日负荷曲线，并将本次事件纳入客户沟通记录。",
-    ):
-        st.markdown(f"- {action}")
-    st.warning("以上为运营辅助建议，不是AI自动决策，也不替代正式交易或结算流程。")
+
+    st.subheader("这次事件改变了什么")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("事件前预测/实际", f"{snapshot['before_forecast_mwh']:.2f} / {snapshot['before_actual_mwh']:.2f} MWh")
+    m2.metric("剩余原预测", f"{snapshot['remaining_forecast_mwh']:.2f} MWh")
+    m3.metric("剩余事后实际", f"{snapshot['remaining_actual_mwh']:.2f} MWh")
+    m4.metric("剩余采购分摊", f"{snapshot['remaining_contract_mwh']:.2f} MWh")
+    st.caption(
+        "以上实际用电是事后复盘结果；事件发生时不能提前看到。事中应使用不恢复/部分恢复等情景估算。"
+    )
+
+    st.subheader("决策卡：信息、取舍和下一步")
+    decision_table = pd.DataFrame(decision_items(calendar_row, snapshot))
+    st.dataframe(decision_table, width="stretch", hide_index=True)
 
 
 def render_credibility(data: dict[str, pd.DataFrame]) -> None:
@@ -539,6 +677,28 @@ def render_credibility(data: dict[str, pd.DataFrame]) -> None:
         "- 15分钟电量 = 功率 × 0.25。\n"
         "- 天气D-1 12:00可得；预测D-1 15:00签发；申报D-1 17:00；突发事件按实际发生时间记录。"
     )
+
+    st.subheader("预测方法与回测边界")
+    st.markdown(
+        "- 基准预测：使用目标日前4个同类日、同一15分钟时刻的负荷中位数。\n"
+        "- 已知状态修正：只使用预测签发前已知的运行状态，不使用突发事件的事后结果。\n"
+        "- 评价：按时间顺序回测，分正常日、计划变化日和突发事件日展示WAPE、MAE和日误差P90。\n"
+        "- 这些是模拟数据上的方法验证，不是生产模型准确率或真实交易收益。"
+    )
+    summary_frames = []
+    for customer_id in CUSTOMERS:
+        summary = backtest_summary_for_customer(data, customer_id)
+        if not summary.empty:
+            summary_frames.append(summary)
+    if summary_frames:
+        summary_display = pd.concat(summary_frames, ignore_index=True)[
+            ["customer_id", "scenario", "days", "wape_ratio", "mae_mw", "p90_daily_wape_ratio"]
+        ].copy()
+        summary_display.columns = ["客户", "场景", "回测天数", "WAPE", "平均绝对误差（MW）", "日误差P90"]
+        summary_display["WAPE"] = summary_display["WAPE"].map(fmt_pct)
+        summary_display["平均绝对误差（MW）"] = summary_display["平均绝对误差（MW）"].map(fmt_mw)
+        summary_display["日误差P90"] = summary_display["日误差P90"].map(fmt_pct)
+        st.dataframe(summary_display, width="stretch", hide_index=True)
 
     st.subheader("模拟边界")
     st.markdown(
@@ -577,12 +737,22 @@ def main() -> None:
         default_date = dates[0]
     with st.sidebar:
         st.header("分析控制")
+        scenario_mode = st.selectbox(
+            "快速场景（MFG01）",
+            ["自选日期", "正常运营日", "计划变化日", "突发事件日"],
+            index=3,
+        )
+        scenario_default = scenario_date(data, "MFG01", scenario_mode)
+        date_value = scenario_default if scenario_default is not None else default_date
         selected_date = st.date_input(
             "模拟分析日",
-            value=default_date,
+            value=date_value,
             min_value=min(dates),
             max_value=max(dates),
+            disabled=scenario_mode != "自选日期",
+            key=f"analysis_date_{scenario_mode}",
         )
+        st.caption("三类场景用于对比常态预测、计划变化和未知事件，不改变源数据。")
         customer_filter_label = st.selectbox(
             "客户筛选",
             ["全部客户"] + [CUSTOMER_LABELS[cid] for cid in CUSTOMERS],
@@ -608,7 +778,7 @@ def main() -> None:
             "2｜客户画像",
             "3｜负荷分析",
             "4｜覆盖与风险",
-            "5｜事件复盘",
+            "5｜运营判断与复盘",
             "6｜数据可信度",
         ]
     )
